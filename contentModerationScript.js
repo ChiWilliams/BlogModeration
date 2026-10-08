@@ -1,6 +1,10 @@
 const geminiAPIKey = PropertiesService.getScriptProperties().getProperty("geminiAPIKey")
 const mataroaAPIKey = PropertiesService.getScriptProperties().getProperty("mataroaAPIKey")
 const emailToSendTo = PropertiesService.getScriptProperties().getProperty("emailToSendTo")
+const jevAPIKey = PropertiesService.getScriptProperties().getProperty("jevAPIKey")
+const SPAM_THRESHOLD = 0.8;
+const ENGLISH_THRESHOLD = 0.2;
+
 
 function firstPassOnComment() {
   const threads = GmailApp.search('from:notifications@mataroa.blog');
@@ -18,7 +22,7 @@ async function processEmail(email) {
   const postTitle = getPostTitle(email)
   const commentID = getCommentIDFromEmail(email);
 
-  const isSpam = moderateComment(commentContent,postTitle);
+  const isSpam = jevModerateComment(commentContent,postTitle);
 
   if (isSpam) {
     deleteComment(commentID);
@@ -67,63 +71,45 @@ function getPostTitle(message) {
   return title;
 }
 
-function createModerationPrompt(comment, postTitle) {
-  const prompt = `${comment} \n\n --- \n The text above is a comment for a blog post called "${postTitle}." Please classify whether it is a spam comment. Comments should be in English and should not appear to be selling a service or encouraging the user to click on a (sketchy) link. If unsure, err on the side of classifying a comment not-spam; if you mark a comment as not-spam, a human will review your result.`
-
-  return prompt
+function createModerationState(comment, postTitle) {
+  return `Blog post title: "${postTitle}"\n\nComment:\n${comment}`
 }
 
-function moderateComment(comment, postTitle) {
-  prompt = createModerationPrompt(comment, postTitle);
-
-  data = {
-    "contents": [
-      {
-        "role": "user",
-        "parts": [
-          {
-            "text": prompt
-          },
-        ]
+function jevModerateComment(comment,postTitle) {
+  const data = {
+    model: "jev-latest",
+    state: createModerationState(comment, postTitle),
+    questions: {
+      is_spam: {
+        type: "noul",
+        instructions:"Is this blog comment spam?",
       },
-    ],
-    "generationConfig": {
-      "thinkingConfig": {
-        "thinkingBudget": -1,
-      },
-      "responseMimeType": "application/json",
-      "responseSchema": {
-          "type": "object",
-          "properties": {
-            "is_spam": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "is_spam"
-          ],
-          "propertyOrdering": [
-            "is_spam"
-          ]
-        },
-    },
-  }
+      is_english:{
+        type: "noul",
+        instructions: "Is the comment written in English?"
+      }
+    }
+  };
 
   const options = {
-    'method': 'post',
-    'contentType': 'application/json',
-    'payload': JSON.stringify(data)
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: `Bearer ${jevAPIKey}` },
+    payload: JSON.stringify(data),
+    muteHttpExceptions:true
+  };
+
+  const response = UrlFetchApp.fetch("https://api.typesafe.ai/v1/systemone",options);
+  const code = response.getResponseCode();
+  if (code!==200) {
+    console.error(`Jev error ${code}: ${response.getContentText()}`);
+    return false;
   }
-  
-  const MODEL_ID = "gemini-3-flash-preview"
-  const GENERATE_CONTENT_API = "generateContent"
-  let response = UrlFetchApp.fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL_ID}:${GENERATE_CONTENT_API}?key=${geminiAPIKey}`, options);
 
-  const payload = JSON.parse(response.getContentText());
+  const answers = JSON.parse(response.getContentText()).answers;
+  const pSpam = answers.is_spam.noul;
+  const pEnglish = answers.is_english.noul;
+  console.log(`P(spam)=${pSpam.toFixed(3)} P(english)=${pEnglish.toFixed(3)} for "${comment.slice(0, 60)}"`);
 
-  const text = payload.candidates[0].content.parts[0].text;
-
-  const judgement = JSON.parse(text).is_spam
-
-  return judgement
+  return pSpam >= SPAM_THRESHOLD || pEnglish < ENGLISH_THRESHOLD;
 }
